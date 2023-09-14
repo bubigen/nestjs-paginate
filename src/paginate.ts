@@ -78,6 +78,7 @@ export interface PaginateConfig<T> {
     paginationType?: PaginationType
     relativePath?: boolean
     origin?: string
+    customCount?: number
 }
 
 export const DEFAULT_MAX_LIMIT = 100
@@ -261,7 +262,12 @@ export async function paginate<T extends ObjectLiteral>(
     }
 
     if (isPaginated) {
-        ;[items, totalItems] = await queryBuilder.getManyAndCount()
+        if (config.customCount) {
+            items = await queryBuilder.getMany()
+            totalItems = config.customCount
+        } else {
+            ;[items, totalItems] = await queryBuilder.getManyAndCount()
+        }
     } else {
         items = await queryBuilder.getMany()
     }
