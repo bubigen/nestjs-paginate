@@ -83,7 +83,7 @@ export interface PaginateConfig<T> {
     paginationType?: PaginationType
     relativePath?: boolean
     origin?: string
-    customCount: number
+    customCount?: number
 }
 
 export const DEFAULT_MAX_LIMIT = 100
