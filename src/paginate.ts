@@ -176,7 +176,8 @@ function flattenWhereAndTransform<T>(
 export async function paginate<T extends ObjectLiteral>(
     query: PaginateQuery,
     repo: Repository<T> | SelectQueryBuilder<T>,
-    config: PaginateConfig<T>
+    config: PaginateConfig<T>,
+    returnBuilder: boolean
 ): Promise<Paginated<T>> {
     const page = positiveNumberOrDefault(query.page, 1, 1)
 
@@ -345,6 +346,10 @@ export async function paginate<T extends ObjectLiteral>(
 
     if (query.filter) {
         addFilter(queryBuilder, query, config.filterableColumns)
+    }
+
+    if (returnBuilder) {
+        return queryBuilder;
     }
 
     if (isPaginated) {
