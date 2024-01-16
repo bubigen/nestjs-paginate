@@ -86,6 +86,7 @@ export interface PaginateConfig<T> {
     ignoreSearchByInQueryParam?: boolean
     ignoreSelectInQueryParam?: boolean
     customCount?: number
+    returnBuilder?: boolean
 }
 
 export const DEFAULT_MAX_LIMIT = 100
@@ -176,8 +177,7 @@ function flattenWhereAndTransform<T>(
 export async function paginate<T extends ObjectLiteral>(
     query: PaginateQuery,
     repo: Repository<T> | SelectQueryBuilder<T>,
-    config: PaginateConfig<T>,
-    returnBuilder: boolean = false
+    config: PaginateConfig<T>
 ): Promise<Paginated<T>> {
     const page = positiveNumberOrDefault(query.page, 1, 1)
 
@@ -348,8 +348,8 @@ export async function paginate<T extends ObjectLiteral>(
         addFilter(queryBuilder, query, config.filterableColumns)
     }
 
-    if (returnBuilder) {
-        return queryBuilder;
+    if (config.returnBuilder) {
+        return new Paginated<T>()
     }
 
     if (isPaginated) {
