@@ -177,7 +177,7 @@ export async function paginate<T extends ObjectLiteral>(
     query: PaginateQuery,
     repo: Repository<T> | SelectQueryBuilder<T>,
     config: PaginateConfig<T>,
-    returnBuilder: boolean
+    returnBuilder?: boolean = false
 ): Promise<Paginated<T>> {
     const page = positiveNumberOrDefault(query.page, 1, 1)
 
