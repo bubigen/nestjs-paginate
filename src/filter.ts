@@ -8,6 +8,7 @@ import {
     ILike,
     In,
     IsNull,
+    JsonContains,
     LessThan,
     LessThanOrEqual,
     MoreThan,
@@ -20,11 +21,15 @@ import { PaginateQuery } from './decorator'
 import {
     checkIsArray,
     checkIsEmbedded,
+    checkIsJsonb,
+    checkIsNestedRelation,
     checkIsRelation,
     extractVirtualProperty,
     fixColumnAlias,
     getPropertiesByColumnName,
+    isDateColumnType,
     isISODate,
+    JoinMethod,
 } from './helper'
 
 export enum FilterOperator {
@@ -81,7 +86,8 @@ export const OperatorSymbolToFunction = new Map<
 ])
 
 type Filter = { comparator: FilterComparator; findOperator: FindOperator<string> }
-type ColumnsFilters = { [columnName: string]: Filter[] }
+type ColumnFilters = { [columnName: string]: Filter[] }
+type ColumnJoinMethods = { [columnName: string]: JoinMethod }
 
 export interface FilterToken {
     comparator: FilterComparator
@@ -158,7 +164,7 @@ export function generatePredicateCondition(
     ) as WherePredicateOperator
 }
 
-export function addWhereCondition<T>(qb: SelectQueryBuilder<T>, column: string, filter: ColumnsFilters) {
+export function addWhereCondition<T>(qb: SelectQueryBuilder<T>, column: string, filter: ColumnFilters) {
     const columnProperties = getPropertiesByColumnName(column)
     const { isVirtualProperty, query: virtualQuery } = extractVirtualProperty(qb, columnProperties)
     const isRelation = checkIsRelation(qb, columnProperties.propertyPath)
@@ -178,7 +184,11 @@ export function addWhereCondition<T>(qb: SelectQueryBuilder<T>, column: string, 
         const parameters = fixQueryParam(alias, columnNamePerIteration, columnFilter, condition, {
             [columnNamePerIteration]: columnFilter.findOperator.value,
         })
-        if (isArray && condition.parameters?.length && !['not', 'isNull'].includes(condition.operator)) {
+        if (
+            isArray &&
+            condition.parameters?.length &&
+            !['not', 'isNull', 'arrayContains'].includes(condition.operator)
+        ) {
             condition.parameters[0] = `cardinality(${condition.parameters[0]})`
         }
         if (columnFilter.comparator === FilterComparator.OR) {
@@ -232,11 +242,30 @@ export function parseFilterToken(raw?: string): FilterToken | null {
     return token
 }
 
-export function parseFilter(
+function fixColumnFilterValue<T>(column: string, qb: SelectQueryBuilder<T>, isJsonb = false) {
+    const columnProperties = getPropertiesByColumnName(column)
+    const virtualProperty = extractVirtualProperty(qb, columnProperties)
+    const columnType = virtualProperty.type
+
+    return (value: string) => {
+        if ((isDateColumnType(columnType) || isJsonb) && isISODate(value)) {
+            return new Date(value)
+        }
+
+        if ((columnType === Number || isJsonb) && !Number.isNaN(value)) {
+            return Number(value)
+        }
+
+        return value
+    }
+}
+
+export function parseFilter<T>(
     query: PaginateQuery,
-    filterableColumns?: { [column: string]: (FilterOperator | FilterSuffix)[] | true }
-): ColumnsFilters {
-    const filter: ColumnsFilters = {}
+    filterableColumns?: { [column: string]: (FilterOperator | FilterSuffix)[] | true },
+    qb?: SelectQueryBuilder<T>
+): ColumnFilters {
+    const filter: ColumnFilters = {}
     if (!filterableColumns || !query.filter) {
         return {}
     }
@@ -277,7 +306,10 @@ export function parseFilter(
                 findOperator: undefined,
             }
 
-            const fixValue = (value: string) => (isISODate(value) ? new Date(value) : value)
+            const fixValue = fixColumnFilterValue(column, qb)
+
+            const columnProperties = getPropertiesByColumnName(column)
+            const isJsonb = checkIsJsonb(qb, columnProperties.column)
 
             switch (token.operator) {
                 case FilterOperator.BTW:
@@ -299,7 +331,28 @@ export function parseFilter(
                     params.findOperator = OperatorSymbolToFunction.get(token.operator)(fixValue(token.value))
             }
 
-            filter[column] = [...(filter[column] || []), params]
+            if (isJsonb) {
+                const parts = column.split('.')
+                const dbColumnName = parts[parts.length - 2]
+                const jsonColumnName = parts[parts.length - 1]
+
+                const jsonFixValue = fixColumnFilterValue(column, qb, true)
+
+                const jsonParams = {
+                    comparator: params.comparator,
+                    findOperator: JsonContains({
+                        [jsonColumnName]: jsonFixValue(token.value),
+                        //! Below seems to not be possible from my understanding, https://github.com/typeorm/typeorm/pull/9665
+                        //! This limits the functionaltiy to $eq only for json columns, which is a bit of a shame.
+                        //! If this is fixed or changed, we can use the commented line below instead.
+                        //[jsonColumnName]: params.findOperator,
+                    }),
+                }
+
+                filter[dbColumnName] = [...(filter[column] || []), jsonParams]
+            } else {
+                filter[column] = [...(filter[column] || []), params]
+            }
 
             if (token.suffix) {
                 const lastFilterElement = filter[column].length - 1
@@ -309,7 +362,6 @@ export function parseFilter(
             }
         }
     }
-
     return filter
 }
 
@@ -317,12 +369,12 @@ export function addFilter<T>(
     qb: SelectQueryBuilder<T>,
     query: PaginateQuery,
     filterableColumns?: { [column: string]: (FilterOperator | FilterSuffix)[] | true }
-): SelectQueryBuilder<T> {
-    const filter = parseFilter(query, filterableColumns)
+): ColumnJoinMethods {
+    const filter = parseFilter(query, filterableColumns, qb)
 
     const filterEntries = Object.entries(filter)
-    const orFilters = filterEntries.filter(([_, value]) => value.some((v) => v.comparator === '$or'))
-    const andFilters = filterEntries.filter(([_, value]) => value.some((v) => v.comparator !== '$or'))
+    const orFilters = filterEntries.filter(([_, value]) => value[0].comparator === '$or')
+    const andFilters = filterEntries.filter(([_, value]) => value[0].comparator === '$and')
 
     qb.andWhere(
         new Brackets((qb: SelectQueryBuilder<T>) => {
@@ -332,13 +384,25 @@ export function addFilter<T>(
         })
     )
 
-    qb.andWhere(
-        new Brackets((qb: SelectQueryBuilder<T>) => {
-            for (const [column] of andFilters) {
+    for (const [column] of andFilters) {
+        qb.andWhere(
+            new Brackets((qb: SelectQueryBuilder<T>) => {
                 addWhereCondition(qb, column, filter)
-            }
-        })
-    )
+            })
+        )
+    }
 
-    return qb
+    // Set the join type of every relationship used in a filter to `innerJoinAndSelect`
+    // so that records without that relationships don't show up in filters on their columns.
+    return Object.fromEntries(
+        filterEntries
+            .map(([key]) => [key, getPropertiesByColumnName(key)] as const)
+            .filter(([, properties]) => properties.propertyPath)
+            .flatMap(([, properties]) => {
+                const nesting = properties.column.split('.')
+                return Array.from({ length: nesting.length - 1 }, (_, i) => nesting.slice(0, i + 1).join('.'))
+                    .filter((relation) => checkIsNestedRelation(qb, relation))
+                    .map((relation) => [relation, 'innerJoinAndSelect'] as const)
+            })
+    )
 }

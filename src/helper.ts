@@ -1,36 +1,80 @@
-import { SelectQueryBuilder } from 'typeorm'
+import { mergeWith } from 'lodash'
+import {
+    FindOperator,
+    FindOptionsRelationByString,
+    FindOptionsRelations,
+    Repository,
+    SelectQueryBuilder,
+} from 'typeorm'
 import { ColumnMetadata } from 'typeorm/metadata/ColumnMetadata'
+import { OrmUtils } from 'typeorm/util/OrmUtils'
 
+/**
+ * Joins 2 keys as `K`, `K.P`, `K.(P` or `K.P)`
+ * The parenthesis notation is included for embedded columns
+ */
 type Join<K, P> = K extends string
     ? P extends string
         ? `${K}${'' extends P ? '' : '.'}${P | `(${P}` | `${P})`}`
         : never
     : never
 
+/**
+ * Get the previous number between 0 and 10. Examples:
+ *   Prev[3] = 2
+ *   Prev[0] = never.
+ *   Prev[20] = 0
+ */
 type Prev = [never, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, ...0[]]
 
-// unwrap Promise type
+/**
+ * Unwrap Promise<T> to T
+ */
 type UnwrapPromise<T> = T extends Promise<infer U> ? UnwrapPromise<U> : T
 
-// Unwrap Array type
+/**
+ * Unwrap Array<T> to T
+ */
 type UnwrapArray<T> = T extends Array<infer U> ? UnwrapArray<U> : T
 
-// TODO: puts some comments here, in this ternary of doom
+/**
+ * Find all the dotted path properties for a given column.
+ *
+ * T: The column
+ * D: max depth
+ */
+//                                            v Have we reached max depth?
 export type Column<T, D extends number = 2> = [D] extends [never]
-    ? never
-    : T extends Record<string, any>
+    ? // yes, stop recursing
+      never
+    : // Are we extending something with keys?
+    T extends Record<string, any>
     ? {
+          // For every keyof T, find all possible properties as a string union
           [K in keyof T]-?: K extends string
-              ? T[K] extends Date
-                  ? `${K}`
-                  : T[K] extends Array<infer U>
-                  ? `${K}` | Join<K, Column<UnwrapArray<U>, Prev[D]>>
-                  : T[K] extends Promise<infer U>
-                  ? U extends Array<infer V>
+              ? // Is it string or number (includes enums)?
+                T[K] extends string | number
+                  ? // yes, add just the key
+                    `${K}`
+                  : // Is it a Date?
+                  T[K] extends Date
+                  ? // yes, add just the key
+                    `${K}`
+                  : // no, is it an array?
+                  T[K] extends Array<infer U>
+                  ? // yes, unwrap it, and recurse deeper
+                    `${K}` | Join<K, Column<UnwrapArray<U>, Prev[D]>>
+                  : // no, is it a promise?
+                  T[K] extends Promise<infer U>
+                  ? // yes, try to infer its return type and recurse
+                    U extends Array<infer V>
                       ? `${K}` | Join<K, Column<UnwrapArray<V>, Prev[D]>>
                       : `${K}` | Join<K, Column<UnwrapPromise<U>, Prev[D]>>
-                  : `${K}` | Join<K, Column<T[K], Prev[D]>>
+                  : // no, we have no more special cases, so treat it as an
+                    // object and recurse deeper on its keys
+                    `${K}` | Join<K, Column<T[K], Prev[D]>>
               : never
+          // Join all the string unions of each keyof T into a single string union
       }[keyof T]
     : ''
 
@@ -43,6 +87,13 @@ export type RelationColumn<T> = Extract<
 
 export type Order<T> = [Column<T>, 'ASC' | 'DESC']
 export type SortBy<T> = Order<T>[]
+
+// eslint-disable-next-line @typescript-eslint/ban-types
+export type MappedColumns<T, S> = { [key in Column<T> | (string & {})]: S }
+export type JoinMethod = 'leftJoinAndSelect' | 'innerJoinAndSelect'
+export type RelationSchemaInput<T = any> = FindOptionsRelations<T> | RelationColumn<T>[] | FindOptionsRelationByString
+// eslint-disable-next-line @typescript-eslint/ban-types
+export type RelationSchema<T = any> = { [relation in Column<T> | (string & {})]: true }
 
 export function isEntityKey<T>(entityColumns: Column<T>[], column: string): column is Column<T> {
     return !!entityColumns.find((c) => c === column)
@@ -80,7 +131,7 @@ export function getPropertiesByColumnName(column: string): ColumnProperties {
 export function extractVirtualProperty(
     qb: SelectQueryBuilder<unknown>,
     columnProperties: ColumnProperties
-): { isVirtualProperty: boolean; query?: ColumnMetadata['query'] } {
+): Partial<ColumnMetadata> {
     const metadata = columnProperties.propertyPath
         ? qb?.expressionMap?.mainAlias?.metadata?.findColumnWithPropertyPath(columnProperties.propertyPath)
               ?.referencedColumn?.entityMetadata // on relation
@@ -102,6 +153,30 @@ export function includesAllPrimaryKeyColumns(qb: SelectQueryBuilder<unknown>, pr
         .every((column) => propertyPath.includes(column))
 }
 
+export function getPrimaryKeyColumns(qb: SelectQueryBuilder<any>, entityName?: string): string[] {
+    return qb.expressionMap.mainAlias?.metadata?.primaryColumns.map((column) =>
+        entityName ? `${entityName}.${column.propertyName}` : column.propertyName
+    )
+}
+
+export function getMissingPrimaryKeyColumns(qb: SelectQueryBuilder<any>, transformedCols: string[]): string[] {
+    if (!transformedCols || transformedCols.length === 0) return []
+
+    const mainEntityPrimaryKeys = getPrimaryKeyColumns(qb)
+    const missingPrimaryKeys: string[] = []
+
+    for (const pk of mainEntityPrimaryKeys) {
+        const columnProperties = getPropertiesByColumnName(pk)
+        const pkAlias = fixColumnAlias(columnProperties, qb.alias, false)
+
+        if (!transformedCols.includes(pkAlias)) {
+            missingPrimaryKeys.push(pkAlias)
+        }
+    }
+
+    return missingPrimaryKeys
+}
+
 export function hasColumnWithPropertyPath(
     qb: SelectQueryBuilder<unknown>,
     columnProperties: ColumnProperties
@@ -119,6 +194,18 @@ export function checkIsRelation(qb: SelectQueryBuilder<unknown>, propertyPath: s
     return !!qb?.expressionMap?.mainAlias?.metadata?.hasRelationWithPropertyPath(propertyPath)
 }
 
+export function checkIsNestedRelation(qb: SelectQueryBuilder<unknown>, propertyPath: string): boolean {
+    let metadata = qb?.expressionMap?.mainAlias?.metadata
+    for (const relationName of propertyPath.split('.')) {
+        const relation = metadata?.relations.find((relation) => relation.propertyPath === relationName)
+        if (!relation) {
+            return false
+        }
+        metadata = relation.inverseEntityMetadata
+    }
+    return true
+}
+
 export function checkIsEmbedded(qb: SelectQueryBuilder<unknown>, propertyPath: string): boolean {
     if (!qb || !propertyPath) {
         return false
@@ -131,6 +218,21 @@ export function checkIsArray(qb: SelectQueryBuilder<unknown>, propertyName: stri
         return false
     }
     return !!qb?.expressionMap?.mainAlias?.metadata.findColumnWithPropertyName(propertyName)?.isArray
+}
+
+export function checkIsJsonb(qb: SelectQueryBuilder<unknown>, propertyName: string): boolean {
+    if (!qb || !propertyName) {
+        return false
+    }
+
+    if (propertyName.includes('.')) {
+        const parts = propertyName.split('.')
+        const dbColumnName = parts[parts.length - 2]
+
+        return qb?.expressionMap?.mainAlias?.metadata.findColumnWithPropertyName(dbColumnName)?.type === 'jsonb'
+    }
+
+    return qb?.expressionMap?.mainAlias?.metadata.findColumnWithPropertyName(propertyName)?.type === 'jsonb'
 }
 
 // This function is used to fix the column alias when using relation, embedded or virtual properties
@@ -190,4 +292,58 @@ const isoDateRegExp = new RegExp(
 
 export function isISODate(str: string): boolean {
     return isoDateRegExp.test(str)
+}
+
+export function isRepository<T>(repo: unknown | Repository<T>): repo is Repository<T> {
+    if (repo instanceof Repository) return true
+    try {
+        if (Object.getPrototypeOf(repo).constructor.name === 'Repository') return true
+        return typeof repo === 'object' && !('connection' in repo) && 'manager' in repo
+    } catch {
+        return false
+    }
+}
+
+export function isFindOperator<T>(value: unknown | FindOperator<T>): value is FindOperator<T> {
+    if (value instanceof FindOperator) return true
+    try {
+        if (Object.getPrototypeOf(value).constructor.name === 'FindOperator') return true
+        return typeof value === 'object' && '_type' in value && '_value' in value
+    } catch {
+        return false
+    }
+}
+
+export function createRelationSchema<T>(configurationRelations: RelationSchemaInput<T>): RelationSchema<T> {
+    return Array.isArray(configurationRelations)
+        ? OrmUtils.propertyPathsToTruthyObject(configurationRelations)
+        : (configurationRelations as RelationSchema<T>)
+}
+
+export function mergeRelationSchema(...schemas: RelationSchema[]) {
+    const noTrueOverride = (obj, source) => (source === true && obj !== undefined ? obj : undefined)
+    return mergeWith({}, ...schemas, noTrueOverride)
+}
+
+export function getPaddedExpr(valueExpr: string, length: number, dbType: string): string {
+    const lengthStr = String(length)
+    if (dbType === 'postgres' || dbType === 'cockroachdb') {
+        return `LPAD((${valueExpr})::bigint::text, ${lengthStr}, '0')`
+    } else if (dbType === 'mysql' || dbType === 'mariadb') {
+        return `LPAD(${valueExpr}, ${lengthStr}, '0')`
+    } else {
+        // sqlite
+        const padding = '0'.repeat(length)
+        return `SUBSTR('${padding}' || CAST(${valueExpr} AS INTEGER), -${lengthStr}, ${lengthStr})`
+    }
+}
+
+export function isDateColumnType(type: any): boolean {
+    const dateTypes = [
+        Date, // JavaScript Date class
+        'datetime',
+        'timestamp',
+        'timestamptz',
+    ]
+    return dateTypes.includes(type)
 }

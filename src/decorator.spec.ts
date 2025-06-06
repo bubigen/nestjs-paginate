@@ -1,5 +1,12 @@
 import { ROUTE_ARGS_METADATA } from '@nestjs/common/constants'
-import { HttpArgumentsHost, CustomParamFactory, ExecutionContext } from '@nestjs/common/interfaces'
+import {
+    CustomParamFactory,
+    ExecutionContext,
+    HttpArgumentsHost,
+    RpcArgumentsHost,
+    Type,
+    WsArgumentsHost,
+} from '@nestjs/common/interfaces'
 import { Request as ExpressRequest } from 'express'
 import { FastifyRequest } from 'fastify'
 import { Paginate, PaginateQuery } from './decorator'
@@ -16,8 +23,9 @@ function getParamDecoratorFactory<T>(decorator: Function): CustomParamFactory {
 }
 const decoratorfactory = getParamDecoratorFactory<PaginateQuery>(Paginate)
 
-function expressContextFactory(query: ExpressRequest['query']): Partial<ExecutionContext> {
-    const mockContext: Partial<ExecutionContext> = {
+function expressContextFactory(query: ExpressRequest['query']): ExecutionContext {
+    const mockContext: ExecutionContext = {
+        getType: <ContextType>() => 'http' as ContextType,
         switchToHttp: (): HttpArgumentsHost =>
             Object({
                 getRequest: (): Partial<ExpressRequest> =>
@@ -28,12 +36,31 @@ function expressContextFactory(query: ExpressRequest['query']): Partial<Executio
                         query: query,
                     }),
             }),
+        getClass: <T = any>(): Type<T> => {
+            throw new Error('Function not implemented.')
+        },
+        getHandler: (): (() => void) => {
+            throw new Error('Function not implemented.')
+        },
+        getArgs: <T extends Array<any> = any[]>(): T => {
+            throw new Error('Function not implemented.')
+        },
+        getArgByIndex: <T = any>(): T => {
+            throw new Error('Function not implemented.')
+        },
+        switchToRpc: (): RpcArgumentsHost => {
+            throw new Error('Function not implemented.')
+        },
+        switchToWs: (): WsArgumentsHost => {
+            throw new Error('Function not implemented.')
+        },
     }
     return mockContext
 }
 
-function fastifyContextFactory(query: FastifyRequest['query']): Partial<ExecutionContext> {
-    const mockContext: Partial<ExecutionContext> = {
+function fastifyContextFactory(query: FastifyRequest['query']): ExecutionContext {
+    const mockContext: ExecutionContext = {
+        getType: <ContextType>() => 'http' as ContextType,
         switchToHttp: (): HttpArgumentsHost =>
             Object({
                 getRequest: (): Partial<FastifyRequest> =>
@@ -45,6 +72,24 @@ function fastifyContextFactory(query: FastifyRequest['query']): Partial<Executio
                         query: query,
                     }),
             }),
+        getClass: <T = any>(): Type<T> => {
+            throw new Error('Function not implemented.')
+        },
+        getHandler: (): (() => void) => {
+            throw new Error('Function not implemented.')
+        },
+        getArgs: <T extends Array<any> = any[]>(): T => {
+            throw new Error('Function not implemented.')
+        },
+        getArgByIndex: <T = any>(): T => {
+            throw new Error('Function not implemented.')
+        },
+        switchToRpc: (): RpcArgumentsHost => {
+            throw new Error('Function not implemented.')
+        },
+        switchToWs: (): WsArgumentsHost => {
+            throw new Error('Function not implemented.')
+        },
     }
     return mockContext
 }
@@ -63,6 +108,7 @@ describe('Decorator', () => {
             searchBy: undefined,
             filter: undefined,
             select: undefined,
+            cursor: undefined,
             path: 'http://localhost/items',
         })
     })
@@ -80,6 +126,7 @@ describe('Decorator', () => {
             searchBy: undefined,
             filter: undefined,
             select: undefined,
+            cursor: undefined,
             path: 'http://localhost/items',
         })
     })
@@ -93,6 +140,7 @@ describe('Decorator', () => {
             'filter.name': '$not:$eq:Kitty',
             'filter.createdAt': ['$gte:2020-01-01', '$lte:2020-12-31'],
             select: ['name', 'createdAt'],
+            cursor: 'abc123',
         })
 
         const result: PaginateQuery = decoratorfactory(null, context)
@@ -112,6 +160,7 @@ describe('Decorator', () => {
                 name: '$not:$eq:Kitty',
                 createdAt: ['$gte:2020-01-01', '$lte:2020-12-31'],
             },
+            cursor: 'abc123',
         })
     })
 
@@ -124,6 +173,7 @@ describe('Decorator', () => {
             'filter.name': '$not:$eq:Kitty',
             'filter.createdAt': ['$gte:2020-01-01', '$lte:2020-12-31'],
             select: ['name', 'createdAt'],
+            cursor: 'abc123',
         })
 
         const result: PaginateQuery = decoratorfactory(null, context)
@@ -143,6 +193,7 @@ describe('Decorator', () => {
                 createdAt: ['$gte:2020-01-01', '$lte:2020-12-31'],
             },
             select: ['name', 'createdAt'],
+            cursor: 'abc123',
         })
     })
 })

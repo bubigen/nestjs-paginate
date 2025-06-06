@@ -17,6 +17,7 @@ Pagination and filtering helper method for TypeORM repositories or query builder
 - Filter using operators (`$eq`, `$not`, `$null`, `$in`, `$gt`, `$gte`, `$lt`, `$lte`, `$btw`, `$ilike`, `$sw`, `$contains`)
 - Include relations and nested relations
 - Virtual column support
+- Cursor-based pagination
 
 ## Installation
 
@@ -93,6 +94,59 @@ http://localhost:3000/cats?limit=5&page=2&sortBy=color:DESC&search=i&filter.age=
 }
 ```
 
+### Example (Cursor-based Pagination)
+
+The following code exposes a route using cursor-based pagination:
+
+#### Endpoint
+
+```url
+http://localhost:3000/cats?limit=5&sortBy=lastVetVisit:ASC&cursor=V998328469600000
+```
+
+#### Result
+
+```json
+{
+  "data": [
+    {
+      "id": 3,
+      "name": "Shadow",
+      "lastVetVisit": "2022-12-21T10:00:00.000Z"
+    },
+    {
+      "id": 4,
+      "name": "Luna",
+      "lastVetVisit": "2022-12-22T10:00:00.000Z"
+    },
+    {
+      "id": 5,
+      "name": "Pepper",
+      "lastVetVisit": "2022-12-23T10:00:00.000Z"
+    },
+    {
+      "id": 6,
+      "name": "Simba",
+      "lastVetVisit": "2022-12-24T10:00:00.000Z"
+    },
+    {
+      "id": 7,
+      "name": "Tiger",
+      "lastVetVisit": "2022-12-25T10:00:00.000Z"
+    }
+  ],
+  "meta": {
+    "itemsPerPage": 5,
+    "cursor": "V998328469600000"
+  },
+  "links": {
+    "previous": "http://localhost:3000/cats?limit=5&sortBy=lastVetVisit:DESC&cursor=V001671616800000",
+    "current": "http://localhost:3000/cats?limit=5&sortBy=lastVetVisit:ASC&cursor=V998328469600000",
+    "next": "http://localhost:3000/cats?limit=5&sortBy=lastVetVisit:ASC&cursor=V998328037600000"
+  }
+}
+```
+
 #### Code
 
 ```ts
@@ -157,7 +211,7 @@ export class CatsController {
 
 ### Config
 
-```ts
+````ts
 const paginateConfig: PaginateConfig<CatEntity> {
   /**
    * Required: true (must have a minimum of one column)
@@ -196,7 +250,17 @@ const paginateConfig: PaginateConfig<CatEntity> {
    * Default: None
    * Description: TypeORM partial selection. Limit selection further by using `select` query param.
    * https://typeorm.io/select-query-builder#partial-selection
-   * Note: You must include the primary key in the selection.
+   * Note: if you do not contain the primary key in the select array, primary key will be added automatically.
+   * 
+   * Wildcard support:
+   * - Use '*' to select all columns from the main entity.
+   * - Use 'relation.*' to select all columns from a relation.
+   * - Use 'relation.subrelation.*' to select all columns from nested relations.
+   * 
+   * Examples:
+   * select: ['*'] - Selects all columns from main entity
+   * select: ['id', 'name', 'toys.*'] - Selects id, name from main entity and all columns from toys relation
+   * select: ['*', 'toys.*'] - Selects all columns from both main entity and toys relation
    */
   select: ['id', 'name', 'color'],
 
@@ -205,7 +269,7 @@ const paginateConfig: PaginateConfig<CatEntity> {
    * Type: number
    * Default: 100
    * Description: The maximum amount of entities to return per page.
-   * Set it to 0, in conjunction with limit=0 on query param, to disable pagination.
+   * Set it to -1, in conjunction with limit=-1 on query param, to disable pagination.
    */
   maxLimit: 20,
 
@@ -259,8 +323,9 @@ const paginateConfig: PaginateConfig<CatEntity> {
   /**
    * Required: false
    * Type: string
-   * Description: Allow user to choose between limit/offset and take/skip.
+   * Description: Allow user to choose between limit/offset and take/skip, or cursor-based pagination.
    * Default: PaginationType.TAKE_AND_SKIP
+   * Options: PaginationType.LIMIT_AND_OFFSET, PaginationType.TAKE_AND_SKIP, PaginationType.CURSOR
    *
    * However, using limit/offset can cause problems with relations.
    */
@@ -296,8 +361,56 @@ const paginateConfig: PaginateConfig<CatEntity> {
    * Description: Prevent `select` query param from limiting selection further. Partial selection will depend upon `select` config option only
    */
   ignoreSelectInQueryParam: true,
+
+  /**
+   * Required: false
+   * Type: 'leftJoinAndSelect' | 'innerJoinAndSelect'
+   * Default: 'leftJoinAndSelect'
+   * Description: Relationships will be joined with either LEFT JOIN or INNER JOIN, and their columns selected. Can be specified per column with `joinMethods` configuration.
+   */
+  defaultJoinMethod: 'leftJoinAndSelect',
+
+  /**
+   * Required: false
+   * Type: MappedColumns<T, JoinMethod>
+   * Default: false
+   * Description: Overrides the join method per relationship.
+   */
+  joinMethods: {age: 'innerJoinAndSelect', size: 'leftJoinAndSelect'},
+
+  /**
+   * Required: false
+   * Type: boolean
+   * Default: false
+   * Description: Enable multi-word search behavior. When true, each word in the search query
+   * will be treated as a separate search term, allowing for more flexible matching.
+   */
+  multiWordSearch: false,
+
+  /**
+   * Required: false
+   * Type: (qb: SelectQueryBuilder<T>) => SelectQueryBuilder<any>
+   * Default: undefined
+   * Description: Callback that lets you override the COUNT query executed by
+   * paginate(). The function receives a **clone** of the original QueryBuilder,
+   * so it already contains every WHERE clause and parameter parsed by
+   * nestjs-paginate.
+   *
+   * Typical use-case: remove expensive LEFT JOINs or build a lighter DISTINCT
+   * count when getManyAndCount() becomes a bottleneck.
+   *
+   * Example:
+   * ```ts
+   * buildCountQuery: qb => {
+   *   qb.expressionMap.joinAttributes = [];   // drop all joins
+   *   qb.select('p.id').distinct(true);       // keep DISTINCT on primary key
+   *   return qb;                              // paginate() will call .getCount()
+   * }
+   * ```
+   */
+  buildCountQuery: (qb: SelectQueryBuilder<T>) => SelectQueryBuilder<any>,
 }
-```
+````
 
 ## Usage with Query Builder
 
@@ -450,6 +563,12 @@ const config: PaginateConfig<CatEntity> = {
 
 `?filter.roles=$contains:moderator,admin` where column `roles` is an array and contains the values `moderator` and `admin`
 
+## Jsonb Filters
+
+You can filter on jsonb columns by using the dot notation. Json columns is limited to `$eq` operators only.
+
+`?filter.metadata.enabled=$eq:true` where column `metadata` is jsonb and contains an object with the key `enabled`.
+
 ## Multi Filters
 
 Multi filters are filters that can be applied to a single column with a comparator.
@@ -458,7 +577,7 @@ Multi filters are filters that can be applied to a single column with a comparat
 
 `?filter.createdAt=$gt:2022-02-02&filter.createdAt=$lt:2022-02-10` where column `createdAt` is after `2022-02-02` **and** before `2022-02-10`
 
-`?filter.id=$contains:moderator&filter.id=$or:$contains:admin` where column `roles` is an array and contains `moderator` **or** `admin`
+`?filter.roles=$contains:moderator&filter.roles=$or:$contains:admin` where column `roles` is an array and contains `moderator` **or** `admin`
 
 `?filter.id=$gt:3&filter.id=$and:$lt:5&filter.id=$or:$eq:7` where column `id` is greater than `3` **and** less than `5` **or** equal to `7`
 
@@ -473,6 +592,38 @@ Multi filters are filters that can be applied to a single column with a comparat
 is resolved to:
 
 `WHERE ... AND (id = 5 OR id = 7) AND name = 'Milo' AND ...`
+
+## Cursor-based Pagination
+
+- `paginationType: PaginationType.CURSOR`
+- Cursor format:
+  - Numbers: `[prefix1][integer:11 digits][prefix2][decimal:4 digits]` (e.g., `Y00000000001V2500` for -1.25 in ASC).
+  - Dates: `[prefix][value:15 digits]` (e.g., `V001671444000000` for a timestamp in DESC).
+- Prefixes:
+  - `null`: `A` (lowest priority, last in results).
+  - ASC:
+    - positive-int: `V` (greater than or equal to 1), `X` (less than 1)
+    - positive-decimal: `V` (not zero), `X` (zero)
+    - zero-int: `X`
+    - zero-decimal: `X`
+    - negative-int: `Y`
+    - negative-decimal: `V`
+  - DESC:
+    - positive-int: `V`
+    - positive-decimal: `V`
+    - zero-int: `N`
+    - zero-decimal: `X`
+    - negative-int: `M` (less than or equal to -1), `N` (greater than -1)
+    - negative-decimal: `V` (not zero), `X` (zero)
+- Logic:
+  - Numbers: Split into integer (11 digits) and decimal (4 digits) parts, with separate prefixes. Supports negative values, with sorting adjusted per direction.
+  - Dates: Single prefix with 15-digit timestamp padded with zeros.
+  - ASC: Negative → Zero → Positive → Null.
+  - DESC: Positive → Zero → Negative → Null.
+- Notes:
+  - Multiple columns: `sortBy` can include multiple columns to create and sort by the cursor (e.g., `sortBy=age:ASC&sortBy=createdAt:DESC`), but at least one column must be unique to ensure consistent ordering.
+  - Supported columns: Cursor sorting is available for numeric and date-related columns (string columns are not supported).
+  - Decimal support: Numeric columns can include decimals, limited to 11 digits for the integer part and 4 digits for the decimal part.
 
 ## Swagger
 
